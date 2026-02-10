@@ -1,0 +1,216 @@
+extends CharacterBody2D
+
+@export var speed := 250.0
+@export var max_health := 100
+@export var current_health := 100
+@export var damage_number_scene: PackedScene  # Drag DamageNumber.tscn here
+
+@onready var sprite: AnimatedSprite2D = $AnimatedSprite2D
+@onready var flashlight: Node2D = $Flashlight
+@onready var sword_hitbox: Area2D = $SwordPivot/SwordHitbox
+
+var can_attack := true
+var is_invulnerable := false
+
+enum PlayerState { IDLE, WALK, ATTACK, DAMAGE }
+var state := PlayerState.IDLE
+
+func _ready():
+	sword_hitbox.monitoring = false
+	current_health = max_health
+	# Connect signals in code to be 100% sure they work
+	if sprite:
+		sprite.animation_finished.connect(_on_animation_finished)
+		sprite.frame_changed.connect(_on_frame_changed)
+
+@warning_ignore("unused_parameter")
+func _physics_process(delta):
+	handle_movement()
+	move_and_slide()
+	update_animation()
+
+@warning_ignore("unused_parameter")
+func _process(delta):
+	aim_at_mouse()
+	if Input.is_action_just_pressed("attack") and can_attack:
+		attack()
+	
+	if Input.is_action_just_pressed("test_button"):
+		take_damage(10)
+	
+	# Safety check - if attack animation stopped playing, reset state
+	if state == PlayerState.ATTACK and sprite.animation != "attack":
+		state = PlayerState.IDLE
+		can_attack = true
+		sword_hitbox.monitoring = false
+
+# ======================
+# MOVEMENT
+# ======================
+func handle_movement():
+	var dir = Vector2(
+		Input.get_action_strength("right") - Input.get_action_strength("left"),
+		Input.get_action_strength("down") - Input.get_action_strength("up")
+	)
+	
+	# Don't change state if attacking or taking damage
+	if state == PlayerState.ATTACK or state == PlayerState.DAMAGE:
+		velocity = Vector2.ZERO
+		return
+	
+	if dir.length() > 0:
+		state = PlayerState.WALK
+		velocity = dir.normalized() * speed
+	else:
+		state = PlayerState.IDLE
+		velocity = Vector2.ZERO
+
+# ======================
+# AIMING
+# ======================
+func aim_at_mouse():
+	var mouse_pos = get_global_mouse_position()
+	
+	# Calculate angle to mouse
+	var angle_to_mouse = global_position.angle_to_point(mouse_pos)
+	
+	# Check if mouse is on left side (angle between 90° and 270°)
+	if mouse_pos.x < global_position.x:
+		# Mouse is on the left - flip sprite and adjust rotation
+		sprite.flip_h = true
+		rotation = angle_to_mouse + PI  # Add 180° to keep it upright
+	else:
+		# Mouse is on the right - normal
+		sprite.flip_h = false
+		rotation = angle_to_mouse
+	
+	# Flashlight follows same rotation
+	if flashlight:
+		flashlight.rotation = 0  # Reset relative rotation since parent is already rotated
+
+# ======================
+# ANIMATIONS
+# ======================
+func update_animation():
+	if sprite == null:
+		return
+	
+	match state:
+		PlayerState.ATTACK:
+			if sprite.animation != "attack":
+				sprite.play("attack")
+		PlayerState.DAMAGE:
+			if sprite.animation != "damage":
+				sprite.play("damage")
+		PlayerState.WALK:
+			if sprite.animation != "walk":
+				sprite.play("walk")
+		PlayerState.IDLE:
+			if sprite.animation != "idle":
+				sprite.play("idle")
+
+# ======================
+# ATTACK
+# ======================
+func attack():
+	if state == PlayerState.ATTACK or state == PlayerState.DAMAGE:
+		return
+	
+	state = PlayerState.ATTACK
+	can_attack = false
+	sprite.play("attack")
+
+# ======================
+# HEALTH SYSTEM
+# ======================
+func take_damage(amount: int):
+	if is_invulnerable:
+		return
+	
+	current_health -= amount
+	print("Player took ", amount, " damage. Health: ", current_health, "/", max_health)
+	
+	# Spawn damage number
+	spawn_damage_number(amount)
+	
+	# Flash red
+	flash_red()
+	
+	# Play damage animation
+	state = PlayerState.DAMAGE
+	sprite.play("damage")
+	
+	# Check for death
+	if current_health <= 0:
+		die()
+	else:
+		# Invulnerability frames (i-frames)
+		start_invulnerability(0.5)
+
+func spawn_damage_number(amount: int):
+	if damage_number_scene == null:
+		print("Warning: No damage number scene assigned!")
+		return
+	
+	var damage_number = damage_number_scene.instantiate()
+	damage_number.global_position = global_position + Vector2(0, -30)  # Spawn above player
+	damage_number.set_damage(amount)
+	
+	# Add to scene (not as child of player, so it doesn't rotate/move with player)
+	get_tree().current_scene.add_child(damage_number)
+
+func heal(amount: int):
+	current_health = min(current_health + amount, max_health)
+	print("Player healed ", amount, ". Health: ", current_health, "/", max_health)
+
+func die():
+	print("Player died!")
+	get_tree().change_scene_to_file("res://death_scene.tscn")
+
+
+func start_invulnerability(duration: float):
+	is_invulnerable = true
+	
+	# Flicker effect during i-frames
+	for i in range(int(duration * 10)):  # Flicker 10 times per second
+		sprite.modulate = Color(1, 0.5, 0.5, 0.5)  # Semi-transparent red
+		await get_tree().create_timer(duration / 20).timeout
+		sprite.modulate = Color(1, 1, 1, 1)  # Normal
+		await get_tree().create_timer(duration / 20).timeout
+	
+	is_invulnerable = false
+	sprite.modulate = Color(1, 1, 1, 1)  # Ensure it's back to normal
+
+func flash_red():
+	# Quick intense red flash
+	var original_modulate = sprite.modulate
+	sprite.modulate = Color(2, 0, 0)  # Bright red (values > 1 = brighter)
+	await get_tree().create_timer(0.1).timeout
+	sprite.modulate = original_modulate
+
+# ======================
+# SIGNALS
+# ======================
+func _on_frame_changed():
+	if sprite.animation == "attack":
+		# Turn hitbox ON during middle of swing
+		if sprite.frame == 2:
+			sword_hitbox.monitoring = true
+		elif sprite.frame == 5:
+			sword_hitbox.monitoring = false
+
+func _on_animation_finished():
+	if sprite.animation == "attack":
+		sword_hitbox.monitoring = false
+		state = PlayerState.IDLE
+		can_attack = true
+	elif sprite.animation == "damage":
+		# Return to idle after damage animation
+		state = PlayerState.IDLE
+
+# Keep these for backwards compatibility if signals were connected in editor
+func _on_AnimatedSprite2D_frame_changed():
+	_on_frame_changed()
+
+func _on_AnimatedSprite2D_animation_finished():
+	_on_animation_finished()
